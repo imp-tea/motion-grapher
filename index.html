@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Huddleston's Distance Grapher</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .left-side, .right-side {
+            flex: 1;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .left-side {
+            border-right: 1px solid #ccc;
+        }
+        .calibration-controls {
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+        .calibration-controls label {
+            margin-right: 5px;
+        }
+        video, canvas#canvasOutput {
+            width: 480px;
+            height: 360px;
+            border: 2px solid #333;
+        }
+        /* Hide the video element */
+        #videoElement {
+            display: none;
+        }
+        /* Style for right-side elements */
+        .graph-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #distanceChart {
+            width: 100%;
+            max-height: 300px;
+        }
+        .graph-buttons {
+            margin-top: 10px;
+        }
+        .graph-buttons button {
+            margin-right: 5px;
+        }
+    </style>
+    <!-- Load OpenCV.js from CDN with defer attribute -->
+    <script defer src="https://docs.opencv.org/3.4.0/opencv.js"></script>
+    <!-- Load Chart.js from CDN -->
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<h2 style="text-align:center;">Huddleston's Distance Grapher</h2>
+
+<div class="container">
+    <div class="left-side">
+        <!-- Canvas element to show the processed video with distance overlay -->
+        <canvas id="canvasOutput"></canvas>
+
+        <div class="calibration-controls">
+            <label for="distanceInput">Distance from Camera (inches):</label>
+            <input type="number" id="distanceInput" name="distanceInput" value="24">
+            <br>
+            <label for="widthInput">Width of Object (inches):</label>
+            <input type="number" id="widthInput" name="widthInput" value="6">
+            <br>
+            <button id="calibrateButton">Calibrate!</button>
+        </div>
+
+        <!-- Video element to capture from webcam (hidden) -->
+        <video id="videoElement" autoplay playsinline></video>
+    </div>
+
+    <div class="right-side">
+        <div class="graph-container">
+            <canvas id="distanceChart"></canvas>
+            <div class="graph-buttons">
+                <button id="beginGraphingButton">Begin Graphing</button>
+                <button id="clearGraphButton">Clear Graph</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Main JavaScript for the tracker functionality -->
+<script>
+    // Global variables to track readiness
+    let videoReady = false;
+    let openCVReady = false;
+
+    // Calibration variables
+    let knownDistance = 24; // default value in inches
+    let realWidth = 6; // default value in inches
+    let focalLength = null; // will be calculated during calibration
+
+    // Graphing variables
+    let chart; // Chart.js chart instance
+    let graphing = false; // Flag to indicate if graphing is active
+    let startTime = null; // Variable to track the start time of graphing
+
+    // Poll every 100ms to check if OpenCV is loaded
+    function checkOpenCVReady() {
+        if (cv && cv.Mat) {
+            console.log("OpenCV.js is ready.");
+            openCVReady = true;
+            if (videoReady) {
+                startProcessing();
+            }
+        } else {
+            setTimeout(checkOpenCVReady, 100); // Retry every 100ms
+        }
+    }
+
+    // DOMContentLoaded event
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log("DOM Content loaded...");
+        const video = document.getElementById('videoElement');
+        const calibrateButton = document.getElementById('calibrateButton');
+        const beginGraphingButton = document.getElementById('beginGraphingButton');
+        const clearGraphButton = document.getElementById('clearGraphButton');
+
+        // Access webcam
+        navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+            video.srcObject = stream;
+            console.log("Video feed successfully accessed");
+        })
+        .catch(error => {
+            console.error("Error accessing the webcam: ", error);
+        });
+
+        // Wait for video to be ready
+        video.addEventListener('canplay', () => {
+            console.log("Video is ready to play");
+            videoReady = true;
+            if (openCVReady) {
+                startProcessing();
+            }
+        });
+
+        // Check OpenCV initialization
+        checkOpenCVReady();
+
+        // Add event listener to calibrate button
+        calibrateButton.addEventListener('click', calibrateCamera);
+
+        // Add event listeners for graphing buttons
+        beginGraphingButton.addEventListener('click', beginGraphing);
+        clearGraphButton.addEventListener('click', clearGraph);
+
+        // Initialize chart
+        initializeChart();
+    });
+
+    function startProcessing() {
+        const video = document.getElementById('videoElement');
+        const canvasOutput = document.getElementById('canvasOutput');
+        const canvasFrame = document.createElement('canvas');
+        const ctx = canvasFrame.getContext('2d', { willReadFrequently: true });
+
+        // Set canvas sizes to match video dimensions
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+        console.log("Video dimensions:", videoWidth, videoHeight);
+
+        canvasOutput.width = videoWidth;
+        canvasOutput.height = videoHeight;
+        canvasFrame.width = videoWidth;
+        canvasFrame.height = videoHeight;
+
+        const src = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
+
+        function processFrame() {
+            try {
+                // Flip and draw the video frame
+                ctx.save();
+                ctx.translate(videoWidth, 0);
+                ctx.scale(-1, 1);
+                ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+                ctx.restore();
+
+                // Get image data
+                let imageData = ctx.getImageData(0, 0, videoWidth, videoHeight);
+                src.data.set(imageData.data);
+
+                // Convert to grayscale
+                let gray = new cv.Mat();
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+                // Apply binary threshold
+                let thresh = new cv.Mat();
+                cv.threshold(gray, thresh, 128, 255, cv.THRESH_BINARY_INV);
+
+                // Find contours
+                let contours = new cv.MatVector();
+                let hierarchy = new cv.Mat();
+                cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                let detectedCross = null;
+
+                // Iterate through contours to find the cross
+                for (let i = 0; i < contours.size(); i++) {
+                    let contour = contours.get(i);
+                    let rect = cv.boundingRect(contour);
+
+                    // Check if the contour matches expected cross shape and size
+                    if (isCrossShape(contour, rect)) {
+                        detectedCross = rect;
+                        contour.delete();
+                        break;
+                    }
+                    contour.delete();
+                }
+
+                let distance = null;
+
+                if (detectedCross) {
+                    const observedWidth = detectedCross.width;
+
+                    // Estimate distance using focal length
+                    if (focalLength !== null) {
+                        distance = (realWidth * focalLength) / observedWidth;
+                        distance = parseFloat(distance.toFixed(2));
+                    }
+
+                    // Draw bounding box and distance text
+                    cv.rectangle(src, new cv.Point(detectedCross.x, detectedCross.y), new cv.Point(detectedCross.x + detectedCross.width, detectedCross.y + detectedCross.height), [0, 255, 0, 255], 2);
+                    cv.putText(src, distance !== null ? distance + " inches" : "Not calibrated", new cv.Point(detectedCross.x, detectedCross.y - 10), cv.FONT_HERSHEY_SIMPLEX, 0.6, [0, 255, 0, 255]);
+                }
+
+                // Update the graph if graphing is active
+                if (graphing && distance !== null) {
+                    let currentTime = (Date.now() - startTime) / 1000; // in seconds
+                    chart.data.datasets[0].data.push({ x: currentTime, y: distance });
+                    chart.update();
+                }
+
+                // Display processed frame
+                cv.imshow('canvasOutput', src);
+
+                // Clean up
+                gray.delete();
+                thresh.delete();
+                contours.delete();
+                hierarchy.delete();
+
+                // Schedule the next frame
+                requestAnimationFrame(processFrame);
+            } catch (err) {
+                console.error("Error in processing frame:", err);
+            }
+        }
+
+        // Start processing frames
+        requestAnimationFrame(processFrame);
+    }
+
+    function isCrossShape(contour, rect) {
+        // Analyze contour for cross-like shape characteristics
+        // Examples include checking for aspect ratio, line intersections, etc.
+
+        // Check aspect ratio close to 1 (square shape)
+        const aspectRatio = rect.width / rect.height;
+        if (aspectRatio < 0.8 || aspectRatio > 1.2) return false;
+
+        // Approximate the contour to reduce the number of vertices
+        let approx = new cv.Mat();
+        cv.approxPolyDP(contour, approx, 0.02 * cv.arcLength(contour, true), true);
+
+        // Check for convexity
+        if (!cv.isContourConvex(approx)) {
+            approx.delete();
+            return false;
+        }
+
+        // Check if the contour has enough vertices (a cross might be represented with more vertices)
+        if (approx.rows < 12) { // Adjust this number based on your cross pattern
+            approx.delete();
+            return false;
+        }
+
+        // Additional checks can be added here to verify the cross shape
+
+        approx.delete();
+        return true;
+    }
+
+    function calibrateCamera() {
+        const video = document.getElementById('videoElement');
+        const canvasFrame = document.createElement('canvas');
+        const ctx = canvasFrame.getContext('2d', { willReadFrequently: true });
+
+        // Get user inputs
+        const distanceInput = document.getElementById('distanceInput');
+        const widthInput = document.getElementById('widthInput');
+
+        knownDistance = parseFloat(distanceInput.value);
+        realWidth = parseFloat(widthInput.value);
+
+        if (isNaN(knownDistance) || isNaN(realWidth)) {
+            alert("Please enter valid numbers for distance and width.");
+            return;
+        }
+
+        // Capture current frame and process
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+
+        canvasFrame.width = videoWidth;
+        canvasFrame.height = videoHeight;
+
+        const src = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
+
+        // Draw the video frame to the offscreen canvas
+        ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+        let imageData = ctx.getImageData(0, 0, videoWidth, videoHeight);
+        src.data.set(imageData.data);
+
+        // Convert to grayscale
+        let gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+        // Apply binary threshold
+        let thresh = new cv.Mat();
+        cv.threshold(gray, thresh, 128, 255, cv.THRESH_BINARY_INV);
+
+        // Find contours
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+        cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        let detectedCross = null;
+
+        // Iterate through contours to find the cross
+        for (let i = 0; i < contours.size(); i++) {
+            let contour = contours.get(i);
+            let rect = cv.boundingRect(contour);
+
+            // Check if the contour matches expected cross shape and size
+            if (isCrossShape(contour, rect)) {
+                detectedCross = rect;
+                contour.delete();
+                break;
+            }
+            contour.delete();
+        }
+
+        if (detectedCross) {
+            const observedWidth = detectedCross.width;
+
+            // Calculate focal length
+            focalLength = (observedWidth * knownDistance) / realWidth;
+            alert("Calibration successful!");
+        } else {
+            alert("No cross detected during calibration. Please make sure the cross is visible and try again.");
+        }
+
+        // Clean up
+        src.delete();
+        gray.delete();
+        thresh.delete();
+        contours.delete();
+        hierarchy.delete();
+    }
+
+    function initializeChart() {
+        const ctx = document.getElementById('distanceChart').getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: 'Distance (inches)',
+                    data: [],
+                    borderColor: 'blue',
+                    fill: false,
+                    pointRadius: 2,
+                    pointHoverRadius: 5
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false, // Disable animations
+                scales: {
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Time (seconds)'
+                        },
+                        type: 'linear',
+                        position: 'bottom',
+                        ticks: {
+                            autoSkip: true,
+                            maxTicksLimit: 10
+                        }
+                    },
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Distance (inches)'
+                        },
+                        beginAtZero: true,
+                        ticks: {
+                            autoSkip: true,
+                            maxTicksLimit: 10
+                        }
+                    }
+                }
+            }
+        });
+        // Add event listener for double-clicks on data points
+        chart.canvas.addEventListener('dblclick', function(event) {
+            const points = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false);
+        
+            if (points.length) {
+                const pointIndex = points[0].index;
+                // Remove the data point
+                chart.data.datasets[0].data.splice(pointIndex, 1);
+                chart.update();
+            }
+        });
+    }
+
+    function beginGraphing() {
+        if (!graphing) {
+            graphing = true;
+            startTime = Date.now();
+            chart.data.datasets[0].data = [];
+            chart.update();
+            document.getElementById('beginGraphingButton').textContent = 'Stop Graphing';
+        } else {
+            graphing = false;
+            document.getElementById('beginGraphingButton').textContent = 'Begin Graphing';
+        }
+    }
+
+    function clearGraph() {
+        graphing = false;
+        document.getElementById('beginGraphingButton').textContent = 'Begin Graphing';
+        chart.data.datasets[0].data = [];
+        chart.update();
+    }
+</script>
+
+</body>
+</html>
