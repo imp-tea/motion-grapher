@@ -325,7 +325,8 @@ function resetSimulation() {
 function updateSimulation() {
   // For each object, update based on current event
   let allDone = true;
-  const effectiveDt = baseDt * speedFactor;
+  //const effectiveDt = baseDt * speedFactor;
+  const effectiveDt = baseDt;
 
   objects.forEach(obj => {
     if (obj.currentEventIndex < obj.accelerationEvents.length) {
